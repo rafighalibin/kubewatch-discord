@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubewatch-nginx-script
+  namespace: kubewatch
+data:
+  app.py: |
+    from flask import Flask, request, jsonify
+    import requests, json, os
+
+    app = Flask(__name__)
+    DISCORD_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+
+    @app.route("/", methods=["POST"])
+    def handle_webhook():
+        try:
+            payload = request.get_json(force=True)
+            print("=== Incoming payload ===")
+            print(json.dumps(payload, indent=2))
+
+            # Wrap payload as Discord message
+            data = {"content": f"```json\n{json.dumps(payload, indent=2)}\n```"}
+            resp = requests.post(DISCORD_URL, json=data)
+            print(f"Forwarded to Discord: {resp.status_code}")
+            return jsonify({"status": "forwarded"}), 200
+        except Exception as e:
+            print("Error:", e)
+            return jsonify({"error": str(e)}), 500
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubewatch-nginx
+  namespace: kubewatch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubewatch-nginx
+  template:
+    metadata:
+      labels:
+        app: kubewatch-nginx
+    spec:
+      containers:
+        - name: listener
+          image: python:3.10-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              pip install flask requests && \
+              python /app/app.py
+          env:
+            - name: DISCORD_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: discord-webhook-secret
+                  key: DISCORD_WEBHOOK_URL
+          volumeMounts:
+            - name: app-script
+              mountPath: /app
+          ports:
+            - containerPort: 8080
+      volumes:
+        - name: app-script
+          configMap:
+            name: kubewatch-nginx-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubewatch-nginx
+  namespace: kubewatch
+spec:
+  selector:
+    app: kubewatch-nginx
+  ports:
+    - port: 80
+      targetPort: 8080
